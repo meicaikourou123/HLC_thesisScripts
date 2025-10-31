@@ -12,9 +12,9 @@ from tqdm import tqdm
 # =========================
 # 配置
 # =========================
-TIF_DIR = r"E:\HLC_data\dap.ceda.ac.uk\neodc\esacci\high_resolution_land_cover\data\land_cover_maps\A03_Siberia\static\v1.2\geotiff\HRLC10\tiles\2019"                 # .tif 文件夹
-OUT_CSV = r"E:\HLC_data\A03samples_stratified3.csv"
-MAX_WORKERS = None                             # 并发进程数；None=自动取CPU核心数
+TIF_DIR = r"E:\HLC_data\dap.ceda.ac.uk\neodc\esacci\high_resolution_land_cover\data\land_cover_maps\A01_Africa\static\v1.2\geotiff\HRLC10\tiles\2019"                 # .tif 文件夹
+OUT_CSV = r"E:\HLC_data\samples\Africa_stratifieespatial.csv"
+MAX_WORKERS = 12                             # 并发进程数；None=自动取CPU核心数
 RANDOM_SEED = 42
 
 # 需要抽样的类别（HRLC legend）
@@ -158,7 +158,6 @@ def sample_tile(tif_path: str, quota_per_class: dict[int,int], class_codes: list
 # =========================
 def main():
     random.seed(RANDOM_SEED)
-
     tif_paths = [p for p in glob.glob(os.path.join(TIF_DIR, "*.tif")) if is_class_map(p)]
     if not tif_paths:
         raise RuntimeError("No classification GeoTIFFs found.")
@@ -170,6 +169,7 @@ def main():
     print("Pass 1/2: counting per-class pixels...")
     with ProcessPoolExecutor(max_workers=MAX_WORKERS) as exe:
         futures = [exe.submit(count_tile_classes, tif, CLASS_CODES) for tif in tif_paths]
+
         for fut in tqdm(as_completed(futures), total=len(futures)):
             tif, counts, err = fut.result()
             if err:
@@ -249,7 +249,7 @@ def main():
         print(f"{c:5d} | {pop:18d} | {tgt:17d} | {act:16d}")
 
     summary = {"population": report_global, "target": report_target, "actual": report_actual}
-    with open(os.path.splitext(OUT_CSV)[0]+"_summary.json","w",encoding="utf-8") as f:
+    with open("E:\HLC_data\samples\summary.json","w",encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     # 额外输出CSV形式的每类统计
@@ -260,7 +260,7 @@ def main():
          "actual_samples": report_actual.get(c, 0)}
         for c in CLASS_CODES
     ])
-    summary_csv_path = os.path.splitext(OUT_CSV)[0] + "_class_summary.csv"
+    summary_csv_path = "E:\HLC_data\samples\class_summary.csv"
     class_summary_df.to_csv(summary_csv_path, index=False)
     print(f"📊 Per-class summary saved -> {summary_csv_path}")
 
