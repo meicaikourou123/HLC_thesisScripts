@@ -139,42 +139,11 @@ def sample_tile(tif_path, quota_per_class, class_codes):
 # ------------------------
 # MAIN
 # ------------------------
-def process_region(region_dir,regionname):
+def process_region(region_dir, regionname):
     region_name = regionname
     tif_paths = sorted(glob.glob(os.path.join(region_dir, "*.tif")))
+    tif_paths = [os.path.normpath(p) for p in tif_paths]  # ✅ 统一路径格式
     print(f"\n🌍 Processing region: {region_name}, found {len(tif_paths)} tiles")
-
-    # cache_path = os.path.join(out_root, f"{region_name}_tile_class_counts.json")
-    # tile_class_counts = {}
-    # global_class_counts = Counter()
-    #
-    # # --- Step 1: Load from cache if available ---
-    # if os.path.exists(cache_path):
-    #     print(f"🧠 Loading cached counts from {cache_path}")
-    #     with open(cache_path, 'r') as f:
-    #         cached = json.load(f)
-    #     tile_class_counts = {k: Counter(v) for k, v in cached["tile_class_counts"].items()}
-    #     global_class_counts = Counter(cached["global_class_counts"])
-    # else:
-    #     print("🚀 Counting pixels in parallel...")
-    #     max_workers = 12
-    #     with ProcessPoolExecutor(max_workers=max_workers) as exe:
-    #         futures = [exe.submit(count_tile_classes, tif) for tif in tif_paths]
-    #         for f in tqdm(as_completed(futures), total=len(futures)):
-    #             tif, counts, err = f.result()
-    #             if err:
-    #                 print(f"⚠️ Error processing {os.path.basename(tif)}: {err}")
-    #                 continue
-    #             tile_class_counts[tif] = counts
-    #             global_class_counts.update(counts)
-    #
-    #     # Save cache
-    #     with open(cache_path, 'w') as f:
-    #         json.dump({
-    #             "tile_class_counts": {k: dict(v) for k, v in tile_class_counts.items()},
-    #             "global_class_counts": dict(global_class_counts)
-    #         }, f)
-    #     print(f"💾 Cached results saved -> {cache_path}")
 
     # --- Load intermediate tile_class_counts if already saved ---
     intermediate_cache = os.path.join(out_root, f"{region_name}_tile_class_counts.json")
@@ -182,10 +151,17 @@ def process_region(region_dir,regionname):
         print(f"📂 Loading intermediate cached tile class counts from {intermediate_cache}")
         with open(intermediate_cache, 'r') as f:
             cached = json.load(f)
-        tile_class_counts = {k: Counter(v) for k, v in cached["tile_class_counts"].items()}
+        # ✅ 路径统一化，防止缓存键不匹配
+        tile_class_counts = {os.path.normpath(k): Counter(v) for k, v in cached["tile_class_counts"].items()}
         global_class_counts = Counter(cached["global_class_counts"])
     else:
-        print("⚠️ Intermediate cache not found, proceeding with existing in-memory data.")
+        print("❌ Intermediate cache not found. Cannot compute quotas.")
+        return pd.DataFrame(columns=["region", "tif_name", "class_code", "lon", "lat"])
+
+    # ✅ 提供备用按文件名查找机制，防止路径不完全匹配
+    cached_by_name = {os.path.basename(k): v for k, v in tile_class_counts.items()}
+    def get_counts_for_path(p):
+        return tile_class_counts.get(p) or cached_by_name.get(os.path.basename(p)) or Counter()
 
     # --- Assign quotas with adaptive total sampling (30,000 globally) ---
     TOTAL_SAMPLES = 30000
@@ -196,13 +172,14 @@ def process_region(region_dir,regionname):
     tile_quota = {t: {c: 0 for c in CLASS_CODES} for t in tif_paths}
 
     for c in CLASS_CODES:
-        tiles_with_c = [t for t in tif_paths if tile_class_counts[t][c] > 0]
-        if not tiles_with_c:
+        tiles_with_c, total_c = [], 0
+        for t in tif_paths:
+            cnts = get_counts_for_path(t)
+            if cnts[c] > 0:
+                tiles_with_c.append(t)
+                total_c += cnts[c]
+        if not tiles_with_c or total_c == 0:
             print(f"⚠️ Class {c} not found in {region_name}")
-            continue
-
-        total_c = sum(tile_class_counts[t][c] for t in tiles_with_c)
-        if total_c == 0:
             continue
 
         # 按像元占比计算样本数量，并限制在 [1000, 3000]
@@ -212,27 +189,23 @@ def process_region(region_dir,regionname):
         target_c = min(target_c, total_c)  # 如果像元不足则取最大可能数
 
         # 按比例分配到各 tile
-        for t in tiles_with_c:
-            # Defensive: ensure tile_class_counts and tile_quota entries exist
-            if t not in tile_class_counts:
-                tile_class_counts[t] = Counter()
-            if t not in tile_quota:
-                tile_quota[t] = {c2: 0 for c2 in CLASS_CODES}
-            try:
-                ratio = tile_class_counts[t][c] / total_c
-                tile_quota[t][c] = int(round(ratio * target_c))
-            except Exception as e:
-                print(f"⚠️ Warning: Exception assigning quota for tile {os.path.basename(t)}, class {c}: {type(e).__name__} - {e}")
-                tile_quota[t][c] = 0
-
-        # 调整误差
-        total_assigned = sum(tile_quota[t][c] for t in tiles_with_c)
-        diff = target_c - total_assigned
-        if diff > 0:
-            for t in random.sample(tiles_with_c, min(diff, len(tiles_with_c))):
-                tile_quota[t][c] += 1
+        assigned = 0
+        for i, t in enumerate(tiles_with_c):
+            cnts = get_counts_for_path(t)
+            if i < len(tiles_with_c) - 1:
+                q = int(round(cnts[c] / total_c * target_c))
+                tile_quota[t][c] = q
+                assigned += q
+            else:
+                tile_quota[t][c] = max(0, target_c - assigned)
 
         print(f"📊 Class {c:3d} | total_pixels={total_c:8d} | target_samples={target_c:5d} | tiles={len(tiles_with_c)}")
+
+    # ✅ 检查配额是否全为 0
+    total_quota = sum(sum(tile_quota[t].values()) for t in tif_paths)
+    if total_quota == 0:
+        print(f"❌ All quotas are 0 in {region_name}. Path mismatch likely.")
+        return pd.DataFrame(columns=["region", "tif_name", "class_code", "lon", "lat"])
 
     # --- Sampling ---
     rows_out_all = []
@@ -240,26 +213,34 @@ def process_region(region_dir,regionname):
     with ProcessPoolExecutor(max_workers=max_workers) as exe:
         futures = [exe.submit(sample_tile, tif, tile_quota[tif], CLASS_CODES) for tif in tif_paths]
         for f in tqdm(as_completed(futures), total=len(futures)):
-            rows_out_all.extend(f.result())
-            if len(rows_out_all) % 10 == 0:
+            result = f.result()
+            if result:
+                rows_out_all.extend(result)
+            # 定期保存局部结果
+            if len(rows_out_all) % 20000 == 0 and len(rows_out_all) > 0:
                 tmp_csv = os.path.join(out_root, f"{region_name}_partial.csv")
-                pd.DataFrame(rows_out_all).to_csv(tmp_csv, index=False)
+                pd.DataFrame(rows_out_all, columns=["region","tif_name","class_code","lon","lat"]).to_csv(tmp_csv, index=False)
                 print(f"🕒 Partial progress saved -> {tmp_csv}")
 
-    df = pd.DataFrame(rows_out_all)
+    # ✅ 固定列名构建 DataFrame（即使空）
+    df = pd.DataFrame(rows_out_all, columns=["region","tif_name","class_code","lon","lat"])
     region_csv = os.path.join(out_root, f"{region_name}_Stratified_Spatial_Samples.csv")
     df.to_csv(region_csv, index=False)
     print(f"✅ Saved {len(df)} samples for {region_name} -> {region_csv}")
+
+    # ✅ 若 df 为空则短路返回，避免 KeyError
+    if df.empty:
+        print(f"⚠️ No samples produced for {region_name}. Please verify cache/path consistency.")
+        return df
 
     # --- Summary report ---
     print("\n📋 Sampling Summary for Region:", region_name)
     summary_data = []
     for c in CLASS_CODES:
         total_pixels = global_class_counts.get(c, 0)
-        print("\n🧾 DataFrame columns:", df.columns.tolist())
-        print(df.head())
         actual_samples = len(df[df["class_code"] == c])
-        expected_target = min(MAX_SAMPLES_PER_CLASS, max(MIN_SAMPLES_PER_CLASS, int(round(TOTAL_SAMPLES * (total_pixels / total_pixels_all_classes)))))
+        expected_target = min(MAX_SAMPLES_PER_CLASS, max(MIN_SAMPLES_PER_CLASS,
+                                int(round(TOTAL_SAMPLES * (total_pixels / total_pixels_all_classes)))))
         status = "✅" if actual_samples >= expected_target else "❌"
         summary_data.append({
             "Class": c,
