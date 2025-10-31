@@ -1,5 +1,3 @@
-
-
 import os, glob, math, random, json
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -25,7 +23,7 @@ CLASS_CODES = [10,20,30,40,50,60,70,80,90,
 NODATA_CODES = {0}                             # NoData 像元值
 TOTAL_SAMPLES = 20000                          # 全局目标样本数
 BALANCE_BY_CLASS = False                       # True=各类均衡；False=按总体占比
-MIN_PER_CLASS = 2000                             # 每类最少样本数
+MIN_PER_CLASS = 1000                             # 每类最少样本数
 
 # =========================
 # 工具函数
@@ -63,6 +61,24 @@ def count_tile_classes(tif_path: str, class_codes: list[int]) -> tuple[str, Coun
     except Exception as e:
         return tif_path, Counter(), f"{e}"
     return tif_path, per_tile, None
+
+
+def spatially_uniform_pick(points: list[dict], grid_deg=0.1) -> list[dict]:
+    """基于网格随机法筛选点，保证空间均匀性，每个网格最多保留一个点"""
+    grid_dict = {}
+    rng = random.Random(RANDOM_SEED)
+    for pt in points:
+        lon, lat = pt["lon"], pt["lat"]
+        gx = int(math.floor(lon / grid_deg))
+        gy = int(math.floor(lat / grid_deg))
+        key = (gx, gy)
+        if key not in grid_dict:
+            grid_dict[key] = []
+        grid_dict[key].append(pt)
+    selected = []
+    for cell_pts in grid_dict.values():
+        selected.append(rng.choice(cell_pts))
+    return selected
 
 
 def sample_tile(tif_path: str, quota_per_class: dict[int,int], class_codes: list[int]) -> list[dict]:
@@ -114,20 +130,24 @@ def sample_tile(tif_path: str, quota_per_class: dict[int,int], class_codes: list
                         if j < q:
                             reservoir[v][j] = (int(r), int(ccol))
 
-            # 输出点
+            # 输出点，先收集每类所有点，后进行空间均匀筛选
             for c in class_codes:
+                pts_c = []
                 for (r, ccol) in reservoir[c]:
                     x, y = xy(src.transform, r, ccol, offset="center")
                     if transformer:
                         lon, lat = transformer.transform(x, y)
                     else:
                         lon, lat = x, y
-                    rows_out.append({
+                    pts_c.append({
                         "tif_name": os.path.basename(tif_path),
                         "class_code": int(c),
                         "lon": float(lon),
                         "lat": float(lat)
                     })
+                # 空间均匀筛选
+                pts_c_selected = spatially_uniform_pick(pts_c, grid_deg=0.1)
+                rows_out.extend(pts_c_selected)
     except Exception as e:
         print(f"⚠️ {os.path.basename(tif_path)}: {e}")
     return rows_out
@@ -167,8 +187,13 @@ def main():
     else:
         denom = sum(global_class_counts[c] for c in CLASS_CODES)
         for c in CLASS_CODES:
+            if global_class_counts[c] == 0:
+                # 跳过不存在的类别
+                continue
             prop = (global_class_counts[c] / denom) if denom > 0 else 0
-            class_target[c] = max(MIN_PER_CLASS, int(round(TOTAL_SAMPLES * prop)))
+            tgt = round(TOTAL_SAMPLES * prop)
+            # 限制在1000到3000之间
+            class_target[c] = max(1000, min(3000, tgt))
 
     # 把配额分配到每个tile
     tile_quota: dict[str,dict[int,int]] = {t: {c:0 for c in CLASS_CODES} for t in tif_paths}
@@ -176,6 +201,8 @@ def main():
         total_c = sum(tile_class_counts[t][c] for t in tif_paths)
         if total_c == 0:
             print(f"⚠️ Class {c} has 0 pixels globally. Skip.")
+            continue
+        if c not in class_target:
             continue
         # 初始分配
         raw = [(t, (tile_class_counts[t][c] / total_c) * class_target[c]) for t in tif_paths]
@@ -209,7 +236,7 @@ def main():
 
     # 报告
     report_global = {int(c): int(global_class_counts[c]) for c in CLASS_CODES}
-    report_target = {int(c): int(class_target[c]) for c in CLASS_CODES}
+    report_target = {int(c): int(class_target[c]) for c in CLASS_CODES if c in class_target}
     report_actual = df["class_code"].value_counts().to_dict()
 
     print("\n===== Stratified Sampling Report =====")
@@ -224,6 +251,18 @@ def main():
     summary = {"population": report_global, "target": report_target, "actual": report_actual}
     with open(os.path.splitext(OUT_CSV)[0]+"_summary.json","w",encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
+
+    # 额外输出CSV形式的每类统计
+    class_summary_df = pd.DataFrame([
+        {"class_code": c,
+         "population_pixels": report_global.get(c, 0),
+         "target_samples": report_target.get(c, 0),
+         "actual_samples": report_actual.get(c, 0)}
+        for c in CLASS_CODES
+    ])
+    summary_csv_path = os.path.splitext(OUT_CSV)[0] + "_class_summary.csv"
+    class_summary_df.to_csv(summary_csv_path, index=False)
+    print(f"📊 Per-class summary saved -> {summary_csv_path}")
 
 
 if __name__ == "__main__":
