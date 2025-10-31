@@ -213,8 +213,17 @@ def process_region(region_dir,regionname):
 
         # 按比例分配到各 tile
         for t in tiles_with_c:
-            ratio = tile_class_counts[t][c] / total_c
-            tile_quota[t][c] = int(round(ratio * target_c))
+            # Defensive: ensure tile_class_counts and tile_quota entries exist
+            if t not in tile_class_counts:
+                tile_class_counts[t] = Counter()
+            if t not in tile_quota:
+                tile_quota[t] = {c2: 0 for c2 in CLASS_CODES}
+            try:
+                ratio = tile_class_counts[t][c] / total_c
+                tile_quota[t][c] = int(round(ratio * target_c))
+            except Exception as e:
+                print(f"⚠️ Warning: Exception assigning quota for tile {os.path.basename(t)}, class {c}: {type(e).__name__} - {e}")
+                tile_quota[t][c] = 0
 
         # 调整误差
         total_assigned = sum(tile_quota[t][c] for t in tiles_with_c)
