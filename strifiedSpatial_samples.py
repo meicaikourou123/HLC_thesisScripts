@@ -162,22 +162,43 @@ def process_region(region_dir,regionname):
             }, f)
         print(f"💾 Cached results saved -> {cache_path}")
 
-    # --- Assign quotas ---
+    # --- Assign quotas with adaptive total sampling (30,000 globally) ---
+    TOTAL_SAMPLES = 30000
+    MIN_SAMPLES_PER_CLASS = 1000
+    MAX_SAMPLES_PER_CLASS = 3000
+
+    total_pixels_all_classes = sum(global_class_counts[c] for c in CLASS_CODES)
     tile_quota = {t: {c: 0 for c in CLASS_CODES} for t in tif_paths}
+
     for c in CLASS_CODES:
         tiles_with_c = [t for t in tif_paths if tile_class_counts[t][c] > 0]
         if not tiles_with_c:
             print(f"⚠️ Class {c} not found in {region_name}")
             continue
+
         total_c = sum(tile_class_counts[t][c] for t in tiles_with_c)
+        if total_c == 0:
+            continue
+
+        # 按像元占比计算样本数量，并限制在 [1000, 3000]
+        proportion = total_c / total_pixels_all_classes
+        target_c = int(round(TOTAL_SAMPLES * proportion))
+        target_c = min(MAX_SAMPLES_PER_CLASS, max(MIN_SAMPLES_PER_CLASS, target_c))
+        target_c = min(target_c, total_c)  # 如果像元不足则取最大可能数
+
+        # 按比例分配到各 tile
         for t in tiles_with_c:
             ratio = tile_class_counts[t][c] / total_c
-            tile_quota[t][c] = int(round(ratio * SAMPLES_PER_CLASS))
+            tile_quota[t][c] = int(round(ratio * target_c))
+
+        # 调整误差
         total_assigned = sum(tile_quota[t][c] for t in tiles_with_c)
-        diff = SAMPLES_PER_CLASS - total_assigned
+        diff = target_c - total_assigned
         if diff > 0:
             for t in random.sample(tiles_with_c, min(diff, len(tiles_with_c))):
                 tile_quota[t][c] += 1
+
+        print(f"📊 Class {c:3d} | total_pixels={total_c:8d} | target_samples={target_c:5d} | tiles={len(tiles_with_c)}")
 
     # --- Sampling ---
     rows_out_all = []
