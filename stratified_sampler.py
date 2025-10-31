@@ -162,21 +162,34 @@ def main():
     if not tif_paths:
         raise RuntimeError("No classification GeoTIFFs found.")
 
-    # Pass1: 并行统计
-    tile_class_counts: dict[str, Counter] = {}
-    global_class_counts = Counter()
-
-    print("Pass 1/2: counting per-class pixels...")
-    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as exe:
-        futures = [exe.submit(count_tile_classes, tif, CLASS_CODES) for tif in tif_paths]
-
-        for fut in tqdm(as_completed(futures), total=len(futures)):
-            tif, counts, err = fut.result()
-            if err:
-                print(f"  ⚠️ skip {os.path.basename(tif)} due to {err}")
-                continue
-            tile_class_counts[tif] = counts
-            global_class_counts.update(counts)
+    # Pass1: 并行统计，带缓存
+    cache_path = os.path.join(os.path.dirname(OUT_CSV), "tile_class_counts_cache.json")
+    if os.path.exists(cache_path):
+        print(f"📂 Loading cached tile class counts from {cache_path} ...")
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        tile_class_counts = {k: Counter(v) for k, v in cached["tile_class_counts"].items()}
+        global_class_counts = Counter(cached["global_class_counts"])
+    else:
+        tile_class_counts: dict[str, Counter] = {}
+        global_class_counts = Counter()
+        print("Pass 1/2: counting per-class pixels...")
+        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as exe:
+            futures = [exe.submit(count_tile_classes, tif, CLASS_CODES) for tif in tif_paths]
+            for fut in tqdm(as_completed(futures), total=len(futures)):
+                tif, counts, err = fut.result()
+                if err:
+                    print(f"  ⚠️ skip {os.path.basename(tif)} due to {err}")
+                    continue
+                tile_class_counts[tif] = counts
+                global_class_counts.update(counts)
+        # 缓存保存
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "tile_class_counts": {k: dict(v) for k, v in tile_class_counts.items()},
+                "global_class_counts": dict(global_class_counts)
+            }, f, indent=2)
+        print(f"💾 Cached results saved -> {cache_path}")
 
     # 计算每类目标样本数
     class_target: dict[int,int] = {}
