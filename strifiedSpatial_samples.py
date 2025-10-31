@@ -16,12 +16,12 @@ import multiprocessing
 
 tile_root=''
 tif_dirs = [
-    r"E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A01_Africa/static/v1.2/geotiff/HRLC10/tiles/2019",
+    # r"E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A01_Africa/static/v1.2/geotiff/HRLC10/tiles/2019",
     r"E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A02_Amazonia/static/v1.2/geotiff/HRLC10/tiles/2019",
     r"E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A03_Siberia/static/v1.2/geotiff/HRLC10/tiles/2019"
 ]
-regionlist=['Africa','Amazonia','Siberia']
-# regionlist=['Amazonia','Siberia']
+# regionlist=['Africa','Amazonia','Siberia']
+regionlist=['Amazonia','Siberia']
 out_root = r"E:/HLC_data/samples/"
 SAMPLES_PER_CLASS = 1000
 CLASS_CODES = [10,20,30,40,50,60,70,80,90,100,110,120,130,140,141,142,150]
@@ -146,17 +146,21 @@ def process_region(region_dir, regionname):
     print(f"\n🌍 Processing region: {region_name}, found {len(tif_paths)} tiles")
 
     # --- Load intermediate tile_class_counts if already saved ---
+    # --- Load intermediate tile_class_counts if already saved ---
     intermediate_cache = os.path.join(out_root, f"{region_name}_tile_class_counts.json")
     if os.path.exists(intermediate_cache):
         print(f"📂 Loading intermediate cached tile class counts from {intermediate_cache}")
         with open(intermediate_cache, 'r') as f:
             cached = json.load(f)
-        # ✅ 路径统一化，防止缓存键不匹配
+
+        # ✅ Normalize all paths for matching
         tile_class_counts = {os.path.normpath(k): Counter(v) for k, v in cached["tile_class_counts"].items()}
         global_class_counts = Counter(cached["global_class_counts"])
     else:
-        print("❌ Intermediate cache not found. Cannot compute quotas.")
-        return pd.DataFrame(columns=["region", "tif_name", "class_code", "lon", "lat"])
+        print("⚠️ Intermediate cache not found, proceeding with existing in-memory data.")
+
+    # ✅ Normalize tif paths too
+    tif_paths = [os.path.normpath(p) for p in tif_paths]
 
     # ✅ 提供备用按文件名查找机制，防止路径不完全匹配
     cached_by_name = {os.path.basename(k): v for k, v in tile_class_counts.items()}
@@ -167,6 +171,8 @@ def process_region(region_dir, regionname):
     TOTAL_SAMPLES = 30000
     MIN_SAMPLES_PER_CLASS = 1000
     MAX_SAMPLES_PER_CLASS = 3000
+    print("🔍 Example cache key:", list(tile_class_counts.keys())[0])
+    print("🔍 Example tif path:", tif_paths[0])
 
     total_pixels_all_classes = sum(global_class_counts[c] for c in CLASS_CODES)
     tile_quota = {t: {c: 0 for c in CLASS_CODES} for t in tif_paths}
