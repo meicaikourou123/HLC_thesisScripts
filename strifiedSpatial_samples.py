@@ -8,6 +8,7 @@ import pandas as pd
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
+import multiprocessing
 
 # ------------------------
 # CONFIGURATION
@@ -33,7 +34,11 @@ def count_tile_classes(tif_path):
     per_tile = Counter()
     try:
         with rasterio.open(tif_path) as src:
-            for _, window in src.block_windows(1):
+            for win_obj in src.block_windows(1):
+                if isinstance(win_obj, tuple) and len(win_obj) == 2:
+                    _, window = win_obj
+                else:
+                    window = win_obj
                 arr = src.read(1, window=window, masked=True)
                 if arr.mask.all():
                     continue
@@ -45,7 +50,7 @@ def count_tile_classes(tif_path):
                 vals, cnts = np.unique(data, return_counts=True)
                 per_tile.update({int(v): int(c) for v, c in zip(vals, cnts)})
     except Exception as e:
-        return tif_path, Counter(), str(e)
+        return tif_path, Counter(), f"{type(e).__name__} - {e}"
     return tif_path, per_tile, None
 
 # ------------------------
@@ -74,7 +79,13 @@ def sample_tile(tif_path, quota_per_class, class_codes):
             reservoir = {c: [] for c in class_codes}
             seen = {c: 0 for c in class_codes}
 
-            for _, window in src.block_windows(1):
+            for i, win_obj in enumerate(src.block_windows(1)):
+                if i % 10 != 0:  # 只处理部分 block，降低内存占用
+                    continue
+                if isinstance(win_obj, tuple) and len(win_obj) == 2:
+                    _, window = win_obj
+                else:
+                    window = win_obj
                 arr = src.read(1, window=window, masked=True)
                 if arr.mask.all():
                     continue
@@ -121,7 +132,7 @@ def sample_tile(tif_path, quota_per_class, class_codes):
                         "lat": lat
                     })
     except Exception as e:
-        print(f"⚠️ {os.path.basename(tif_path)}: {e}")
+        print(f"⚠️ Error processing {os.path.basename(tif_path)}: {type(e).__name__} - {e}")
     return rows_out
 
 # ------------------------
@@ -145,11 +156,13 @@ def process_region(region_dir,regionname):
         global_class_counts = Counter(cached["global_class_counts"])
     else:
         print("🚀 Counting pixels in parallel...")
-        with ProcessPoolExecutor(max_workers=6) as exe:
+        max_workers = max(2, min(6, multiprocessing.cpu_count() // 2))
+        with ProcessPoolExecutor(max_workers=max_workers) as exe:
             futures = [exe.submit(count_tile_classes, tif) for tif in tif_paths]
             for f in tqdm(as_completed(futures), total=len(futures)):
                 tif, counts, err = f.result()
                 if err:
+                    print(f"⚠️ Error processing {os.path.basename(tif)}: {err}")
                     continue
                 tile_class_counts[tif] = counts
                 global_class_counts.update(counts)
@@ -161,6 +174,17 @@ def process_region(region_dir,regionname):
                 "global_class_counts": dict(global_class_counts)
             }, f)
         print(f"💾 Cached results saved -> {cache_path}")
+
+    # --- Load intermediate tile_class_counts if already saved ---
+    intermediate_cache = os.path.join(out_root, f"{region_name}_tile_class_counts.json")
+    if os.path.exists(intermediate_cache):
+        print(f"📂 Loading intermediate cached tile class counts from {intermediate_cache}")
+        with open(intermediate_cache, 'r') as f:
+            cached = json.load(f)
+        tile_class_counts = {k: Counter(v) for k, v in cached["tile_class_counts"].items()}
+        global_class_counts = Counter(cached["global_class_counts"])
+    else:
+        print("⚠️ Intermediate cache not found, proceeding with existing in-memory data.")
 
     # --- Assign quotas with adaptive total sampling (30,000 globally) ---
     TOTAL_SAMPLES = 30000
@@ -202,15 +226,41 @@ def process_region(region_dir,regionname):
 
     # --- Sampling ---
     rows_out_all = []
-    with ProcessPoolExecutor(max_workers=6) as exe:
+    max_workers = max(2, min(6, multiprocessing.cpu_count() // 2))
+    with ProcessPoolExecutor(max_workers=max_workers) as exe:
         futures = [exe.submit(sample_tile, tif, tile_quota[tif], CLASS_CODES) for tif in tif_paths]
         for f in tqdm(as_completed(futures), total=len(futures)):
             rows_out_all.extend(f.result())
+            if len(rows_out_all) % 10 == 0:
+                tmp_csv = os.path.join(out_root, f"{region_name}_partial.csv")
+                pd.DataFrame(rows_out_all).to_csv(tmp_csv, index=False)
+                print(f"🕒 Partial progress saved -> {tmp_csv}")
 
     df = pd.DataFrame(rows_out_all)
     region_csv = os.path.join(out_root, f"{region_name}_Stratified_Spatial_Samples.csv")
     df.to_csv(region_csv, index=False)
     print(f"✅ Saved {len(df)} samples for {region_name} -> {region_csv}")
+
+    # --- Summary report ---
+    print("\n📋 Sampling Summary for Region:", region_name)
+    summary_data = []
+    for c in CLASS_CODES:
+        total_pixels = global_class_counts.get(c, 0)
+        actual_samples = len(df[df["class_code"] == c])
+        expected_target = min(MAX_SAMPLES_PER_CLASS, max(MIN_SAMPLES_PER_CLASS, int(round(TOTAL_SAMPLES * (total_pixels / total_pixels_all_classes)))))
+        status = "✅" if actual_samples >= expected_target else "❌"
+        summary_data.append({
+            "Class": c,
+            "Total Pixels": total_pixels,
+            "Target Samples": expected_target,
+            "Actual Samples": actual_samples,
+            "Status": status
+        })
+
+    summary_df = pd.DataFrame(summary_data)
+    print(summary_df.to_string(index=False))
+    print("\n⚠️  Legend: ✅ sufficient | ❌ below target\n")
+
     return df
 
 def main():
