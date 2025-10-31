@@ -1,7 +1,6 @@
 import os, glob, math, random, json
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
-
 import numpy as np
 import pandas as pd
 import rasterio
@@ -14,19 +13,12 @@ from tqdm import tqdm
 # =========================
 regionname=['A01_Africa','A02_Amazonia','A03_Siberia']
 region_name=regionname[0]
-TIF_DIR = "E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/"+region_name+"/static/v1.2/geotiff/HRLC10/tiles/2019"
-OUT_CSV = "E:/HLC_data/samples/"+region_name+"_stratified_spatial.csv"
-middle_cache_file="E:/HLC_data/samples/"+region_name+"_tile_class_counts_cache.json"
-summaryJson="E:/HLC_data/samples/"+region_name+"summary.json"
-summary_csv_path = "E:/HLC_data/samples/"+region_name+"class_summary.csv"
-
-# TIF_DIR = "E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A02_Amazonia/static/v1.2/geotiff/HRLC10/tiles/2019"
-# OUT_CSV = "E:/HLC_data/samples/Amazonia_stratified_spatial.csv"
-# middle_cache_file="E:/HLC_data/samples/Amazonia_tile_class_counts_cache.json"
-# TIF_DIR = "E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A03_Siberia/static/v1.2/geotiff/HRLC10/tiles/2019"                 # .tif 文件夹
-# OUT_CSV = "E:/HLC_data/samples/Siberia_stratified_spatial.csv"
-# middle_cache_file="E:/HLC_data/samples/Siberia_tile_class_counts_cache.json"
-MAX_WORKERS = 12                             # 并发进程数；None=自动取CPU核心数
+TIF_DIR = "/Volumes/New Volume/Tile Data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/"+region_name+"/static/v1.2/geotiff/HRLC10/tiles/2019"
+OUT_CSV = "/Users/sunzheng/Python/LC_sample/samples/"+region_name+"_stratified_spatial.csv"
+middle_cache_file="/Users/sunzheng/Python/LC_sample/samples/"+region_name+"_tile_class_counts_cache.json"
+summaryJson="/Users/sunzheng/Python/LC_sample/samples/"+region_name+"summary.json"
+summary_csv_path = "/Users/sunzheng/Python/LC_sample/samples/"+region_name+"class_summary.csv"
+MAX_WORKERS = 4                           # 并发进程数；None=自动取CPU核心数
 RANDOM_SEED = 42
 
 # 需要抽样的类别（HRLC legend）
@@ -165,12 +157,18 @@ def sample_tile(tif_path: str, quota_per_class: dict[int,int], class_codes: list
     return rows_out
 
 
+def norm(path: str) -> str:
+    """统一路径格式"""
+    return os.path.normpath(path)
+
+
 # =========================
 # 主流程
 # =========================
 def main():
     random.seed(RANDOM_SEED)
     tif_paths = [p for p in glob.glob(os.path.join(TIF_DIR, "*.tif")) if is_class_map(p)]
+    print("Found", len(tif_paths), "tif files in", TIF_DIR)
     if not tif_paths:
         raise RuntimeError("No classification GeoTIFFs found.")
 
@@ -180,21 +178,22 @@ def main():
         print(f"📂 Loading cached tile class counts from {cache_path} ...")
         with open(cache_path, "r", encoding="utf-8") as f:
             cached = json.load(f)
-        tile_class_counts = {k: Counter(v) for k, v in cached["tile_class_counts"].items()}
+        # 统一缓存键路径格式
+        tile_class_counts = {norm(k): Counter(v) for k, v in cached["tile_class_counts"].items()}
         global_class_counts = Counter(cached["global_class_counts"])
     else:
         tile_class_counts: dict[str, Counter] = {}
         global_class_counts = Counter()
         print("Pass 1/2: counting per-class pixels...")
         with ProcessPoolExecutor(max_workers=MAX_WORKERS) as exe:
-            print("Found", len(tif_paths), "tif files in", TIF_DIR)
+
             futures = [exe.submit(count_tile_classes, tif, CLASS_CODES) for tif in tif_paths]
             for fut in tqdm(as_completed(futures), total=len(futures)):
                 tif, counts, err = fut.result()
                 if err:
                     print(f"  ⚠️ skip {os.path.basename(tif)} due to {err}")
                     continue
-                tile_class_counts[tif] = counts
+                tile_class_counts[norm(tif)] = counts
                 global_class_counts.update(counts)
         # 缓存保存
         with open(cache_path, "w", encoding="utf-8") as f:
@@ -203,6 +202,17 @@ def main():
                 "global_class_counts": dict(global_class_counts)
             }, f, indent=2)
         print(f"💾 Cached results saved -> {cache_path}")
+
+    # 对齐 tif_paths 路径格式
+    norm_tif_paths = [norm(p) for p in tif_paths]
+
+    # 对齐缓存中的 tile_class_counts，去除缓存中不存在于当前目录的文件
+    tile_class_counts = {k: v for k, v in tile_class_counts.items() if k in norm_tif_paths}
+
+    # 重新计算 global_class_counts 以确保准确
+    global_class_counts = Counter()
+    for counts in tile_class_counts.values():
+        global_class_counts.update(counts)
 
     # 计算每类目标样本数
     class_target: dict[int,int] = {}
@@ -222,16 +232,15 @@ def main():
             class_target[c] = max(1000, min(3000, tgt))
 
     # 把配额分配到每个tile
-    tile_quota: dict[str,dict[int,int]] = {t: {c:0 for c in CLASS_CODES} for t in tif_paths}
+    tile_quota: dict[str,dict[int,int]] = {t: {c:0 for c in CLASS_CODES} for t in norm_tif_paths}
     for c in CLASS_CODES:
-        total_c = sum(tile_class_counts[t][c] for t in tif_paths)
+        total_c = sum(tile_class_counts[t][c] for t in norm_tif_paths if c in tile_class_counts[t])
         if total_c == 0:
-            print(f"⚠️ Class {c} has 0 pixels globally. Skip.")
             continue
         if c not in class_target:
             continue
         # 初始分配
-        raw = [(t, (tile_class_counts[t][c] / total_c) * class_target[c]) for t in tif_paths]
+        raw = [(t, (tile_class_counts[t][c] / total_c) * class_target[c]) for t in norm_tif_paths]
         floor_alloc = {t:int(math.floor(p)) for t,p in raw}
         remain = class_target[c] - sum(floor_alloc.values())
         residual_order = sorted(raw, key=lambda kv: kv[1]-math.floor(kv[1]), reverse=True)
@@ -240,7 +249,7 @@ def main():
             if isinstance(item, tuple) and len(item)==2:
                 t, _ = item
                 tile_alloc[t] += 1
-        for t in tif_paths:
+        for t in norm_tif_paths:
             cnt = tile_class_counts.get(t,Counter()).get(c,0)
             if cnt == 0:
                 tile_quota[t][c] = 0
@@ -251,7 +260,7 @@ def main():
     print("Pass 2/2: sampling points...")
     rows_out_all: list[dict] = []
     with ProcessPoolExecutor(max_workers=MAX_WORKERS) as exe:
-        futures = [exe.submit(sample_tile, tif, tile_quota[tif], CLASS_CODES) for tif in tif_paths]
+        futures = [exe.submit(sample_tile, t, tile_quota[t], CLASS_CODES) for t in norm_tif_paths]
         for fut in tqdm(as_completed(futures), total=len(futures)):
             rows_out_all.extend(fut.result())
 
