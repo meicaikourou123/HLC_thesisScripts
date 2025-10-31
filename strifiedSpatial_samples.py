@@ -16,12 +16,13 @@ import multiprocessing
 
 tile_root=''
 tif_dirs = [
-    r"/Volumes/New Volume/Tile Data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A01_Africa/static/v1.2/geotiff/HRLC10/tiles/2019",
-    r"/Volumes/New Volume/Tile Data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A02_Amazonia/static/v1.2/geotiff/HRLC10/tiles/2019",
-    r"/Volumes/New Volume/Tile Data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A03_Siberia/static/v1.2/geotiff/HRLC10/tiles/2019"
+    r"E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A01_Africa/static/v1.2/geotiff/HRLC10/tiles/2019",
+    r"E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A02_Amazonia/static/v1.2/geotiff/HRLC10/tiles/2019",
+    r"E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A03_Siberia/static/v1.2/geotiff/HRLC10/tiles/2019"
 ]
 regionlist=['Africa','Amazonia','Siberia']
-out_root = r"/Users/sunzheng/Python/LC_sample/samples"
+# regionlist=['Amazonia','Siberia']
+out_root = r"E:/HLC_data/samples/"
 SAMPLES_PER_CLASS = 1000
 CLASS_CODES = [10,20,30,40,50,60,70,80,90,100,110,120,130,140,141,142,150]
 NODATA_CODES = {0}
@@ -143,37 +144,37 @@ def process_region(region_dir,regionname):
     tif_paths = sorted(glob.glob(os.path.join(region_dir, "*.tif")))
     print(f"\n🌍 Processing region: {region_name}, found {len(tif_paths)} tiles")
 
-    cache_path = os.path.join(out_root, f"{region_name}_tile_class_counts.json")
-    tile_class_counts = {}
-    global_class_counts = Counter()
-
-    # --- Step 1: Load from cache if available ---
-    if os.path.exists(cache_path):
-        print(f"🧠 Loading cached counts from {cache_path}")
-        with open(cache_path, 'r') as f:
-            cached = json.load(f)
-        tile_class_counts = {k: Counter(v) for k, v in cached["tile_class_counts"].items()}
-        global_class_counts = Counter(cached["global_class_counts"])
-    else:
-        print("🚀 Counting pixels in parallel...")
-        max_workers = max(2, min(6, multiprocessing.cpu_count() // 2))
-        with ProcessPoolExecutor(max_workers=max_workers) as exe:
-            futures = [exe.submit(count_tile_classes, tif) for tif in tif_paths]
-            for f in tqdm(as_completed(futures), total=len(futures)):
-                tif, counts, err = f.result()
-                if err:
-                    print(f"⚠️ Error processing {os.path.basename(tif)}: {err}")
-                    continue
-                tile_class_counts[tif] = counts
-                global_class_counts.update(counts)
-
-        # Save cache
-        with open(cache_path, 'w') as f:
-            json.dump({
-                "tile_class_counts": {k: dict(v) for k, v in tile_class_counts.items()},
-                "global_class_counts": dict(global_class_counts)
-            }, f)
-        print(f"💾 Cached results saved -> {cache_path}")
+    # cache_path = os.path.join(out_root, f"{region_name}_tile_class_counts.json")
+    # tile_class_counts = {}
+    # global_class_counts = Counter()
+    #
+    # # --- Step 1: Load from cache if available ---
+    # if os.path.exists(cache_path):
+    #     print(f"🧠 Loading cached counts from {cache_path}")
+    #     with open(cache_path, 'r') as f:
+    #         cached = json.load(f)
+    #     tile_class_counts = {k: Counter(v) for k, v in cached["tile_class_counts"].items()}
+    #     global_class_counts = Counter(cached["global_class_counts"])
+    # else:
+    #     print("🚀 Counting pixels in parallel...")
+    #     max_workers = 12
+    #     with ProcessPoolExecutor(max_workers=max_workers) as exe:
+    #         futures = [exe.submit(count_tile_classes, tif) for tif in tif_paths]
+    #         for f in tqdm(as_completed(futures), total=len(futures)):
+    #             tif, counts, err = f.result()
+    #             if err:
+    #                 print(f"⚠️ Error processing {os.path.basename(tif)}: {err}")
+    #                 continue
+    #             tile_class_counts[tif] = counts
+    #             global_class_counts.update(counts)
+    #
+    #     # Save cache
+    #     with open(cache_path, 'w') as f:
+    #         json.dump({
+    #             "tile_class_counts": {k: dict(v) for k, v in tile_class_counts.items()},
+    #             "global_class_counts": dict(global_class_counts)
+    #         }, f)
+    #     print(f"💾 Cached results saved -> {cache_path}")
 
     # --- Load intermediate tile_class_counts if already saved ---
     intermediate_cache = os.path.join(out_root, f"{region_name}_tile_class_counts.json")
@@ -246,6 +247,8 @@ def process_region(region_dir,regionname):
     summary_data = []
     for c in CLASS_CODES:
         total_pixels = global_class_counts.get(c, 0)
+        print("\n🧾 DataFrame columns:", df.columns.tolist())
+        print(df.head())
         actual_samples = len(df[df["class_code"] == c])
         expected_target = min(MAX_SAMPLES_PER_CLASS, max(MIN_SAMPLES_PER_CLASS, int(round(TOTAL_SAMPLES * (total_pixels / total_pixels_all_classes)))))
         status = "✅" if actual_samples >= expected_target else "❌"
