@@ -12,8 +12,20 @@ from tqdm import tqdm
 # =========================
 # 配置
 # =========================
-TIF_DIR = r"E:\HLC_data\dap.ceda.ac.uk\neodc\esacci\high_resolution_land_cover\data\land_cover_maps\A01_Africa\static\v1.2\geotiff\HRLC10\tiles\2019"                 # .tif 文件夹
-OUT_CSV = r"E:\HLC_data\samples\Africa_stratifieespatial.csv"
+regionname=['A01_Africa','A02_Amazonia','A03_Siberia']
+region_name=regionname[0]
+TIF_DIR = "E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/"+region_name+"/static/v1.2/geotiff/HRLC10/tiles/2019"
+OUT_CSV = "E:/HLC_data/samples/"+region_name+"_stratified_spatial.csv"
+middle_cache_file="E:/HLC_data/samples/"+region_name+"_tile_class_counts_cache.json"
+summaryJson="E:/HLC_data/samples/"+region_name+"summary.json"
+summary_csv_path = "E:/HLC_data/samples/"+region_name+"class_summary.csv"
+
+# TIF_DIR = "E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A02_Amazonia/static/v1.2/geotiff/HRLC10/tiles/2019"
+# OUT_CSV = "E:/HLC_data/samples/Amazonia_stratified_spatial.csv"
+# middle_cache_file="E:/HLC_data/samples/Amazonia_tile_class_counts_cache.json"
+# TIF_DIR = "E:/HLC_data/dap.ceda.ac.uk/neodc/esacci/high_resolution_land_cover/data/land_cover_maps/A03_Siberia/static/v1.2/geotiff/HRLC10/tiles/2019"                 # .tif 文件夹
+# OUT_CSV = "E:/HLC_data/samples/Siberia_stratified_spatial.csv"
+# middle_cache_file="E:/HLC_data/samples/Siberia_tile_class_counts_cache.json"
 MAX_WORKERS = 12                             # 并发进程数；None=自动取CPU核心数
 RANDOM_SEED = 42
 
@@ -163,7 +175,7 @@ def main():
         raise RuntimeError("No classification GeoTIFFs found.")
 
     # Pass1: 并行统计，带缓存
-    cache_path = os.path.join(os.path.dirname(OUT_CSV), "tile_class_counts_cache.json")
+    cache_path =  middle_cache_file
     if os.path.exists(cache_path):
         print(f"📂 Loading cached tile class counts from {cache_path} ...")
         with open(cache_path, "r", encoding="utf-8") as f:
@@ -175,6 +187,7 @@ def main():
         global_class_counts = Counter()
         print("Pass 1/2: counting per-class pixels...")
         with ProcessPoolExecutor(max_workers=MAX_WORKERS) as exe:
+            print("Found", len(tif_paths), "tif files in", TIF_DIR)
             futures = [exe.submit(count_tile_classes, tif, CLASS_CODES) for tif in tif_paths]
             for fut in tqdm(as_completed(futures), total=len(futures)):
                 tif, counts, err = fut.result()
@@ -262,7 +275,7 @@ def main():
         print(f"{c:5d} | {pop:18d} | {tgt:17d} | {act:16d}")
 
     summary = {"population": report_global, "target": report_target, "actual": report_actual}
-    with open("E:\HLC_data\samples\summary.json","w",encoding="utf-8") as f:
+    with open(summaryJson,"w",encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     # 额外输出CSV形式的每类统计
@@ -273,7 +286,7 @@ def main():
          "actual_samples": report_actual.get(c, 0)}
         for c in CLASS_CODES
     ])
-    summary_csv_path = "E:\HLC_data\samples\class_summary.csv"
+
     class_summary_df.to_csv(summary_csv_path, index=False)
     print(f"📊 Per-class summary saved -> {summary_csv_path}")
 
